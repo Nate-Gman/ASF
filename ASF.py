@@ -160,6 +160,8 @@ CONTROLS
   1..8 ........ AIRCRAFT / BLUEPRINT / AIR SYSTEM / BALLISTIC / COMBAT / VERDICT / FLIGHT / DOG FIGHT
   mouse L ..... orbit          mouse R/M ..... pan          wheel ..... zoom
   E ........... exploded view  X ............. section cut  L ......... labels
+  V ........... faired view    Z ............. wireframe     G ......... gear up/down
+  N ........... weapons shown  O ............. drones deployed
   SPACE ....... vent burst     B ............. fire 2,500 rounds at the frame
   P ........... plasma stealth  S ............. 10,000 dogfights            F ..... 1-v-100 fleet run
   R ........... reset view     H ............. help         ESC/Q ..... quit
@@ -3366,12 +3368,122 @@ class Renderer:
         self.explode_amt = 0.0
         self.section = False
         self.labels = False
+        self.faired = False
+        self.wireframe = False
+        self.gear_up = False
+        self.drones_deployed = False
+        self._faired_meshes = None
+        self._drone_pos = None
+        self._weapon_meshes = None
+        self.weapons_visible = False
         self.hovered = None
         self.selected = None
 
     def reset(self):
         self.az, self.el, self.dist = self._home
         self.pan = np.array([0.0, 0.0])
+
+    def _build_faired_meshes(self):
+        """Streamline teardrop fairings over every structural tube (the
+        ricochet shields in their role as drag-reducing fairings)."""
+        if self._faired_meshes is not None:
+            return self._faired_meshes
+        chunks = []
+        for part in self.parts:
+            if part.group not in ("frame", "wing", "gear"):
+                continue
+            for p0, p1, r in part.capsules:
+                L = float(np.linalg.norm(p1 - p0))
+                if L < 0.30:
+                    continue
+                rf = r * 1.8
+                nose_end = p0 + (p1 - p0) * 0.12
+                body_end = p0 + (p1 - p0) * 0.72
+                vf = _taper_pipe(p0, nose_end, r * 0.4, rf, 6)
+                if vf[0]:
+                    chunks.append(vf)
+                vf = _pipe(nose_end, body_end, rf, 6)
+                if vf[0]:
+                    chunks.append(vf)
+                vf = _taper_pipe(body_end, p1, rf, r * 0.2, 6)
+                if vf[0]:
+                    chunks.append(vf)
+        if chunks:
+            v, f = _combine(chunks)
+            self._faired_meshes = [Mesh(v, f, (58, 68, 84), "fairings", alpha=160)]
+        else:
+            self._faired_meshes = []
+        return self._faired_meshes
+
+    def _drone_positions(self):
+        """World-space positions of the 25 micro-drones when deployed."""
+        if self._drone_pos is not None:
+            return self._drone_pos
+        pts = []
+        for sgn in (-1.0, 1.0):
+            for i in range(12):
+                x = sgn * (3.0 + i * 0.35)
+                yl = _wing_y(Y_LOWER, abs(x)) - 0.16
+                z = Z_LE_LOW + 0.35 + (i % 3) * 0.25
+                offset = np.array([0.0, -0.4 - i * 0.15, 0.0])
+                pts.append(np.array([x, yl, z]) + offset)
+            pts.append(np.array([sgn * 3.2, _wing_y(Y_LOWER, 3.2) - 0.6, Z_LE_LOW + 0.75]))
+        self._drone_pos = pts
+        return self._drone_pos
+
+    def _build_weapon_meshes(self):
+        """Missile rails, DEW emitter dish, and gun barrel detail."""
+        if self._weapon_meshes is not None:
+            return self._weapon_meshes
+        chunks = []
+        # -- 5 missile rails on lower wing trailing edge --
+        rail_col = (90, 95, 108)
+        for i in range(5):
+            sgn = -1.0 if i < 2 else (1.0 if i < 4 else 0.0)
+            if sgn == 0.0:
+                x = 0.0
+            else:
+                x = sgn * (1.8 + (i % 2) * 1.2)
+            yl = _wing_y(Y_LOWER, abs(x))
+            z0 = Z_LE_LOW + 0.90 * DIMS["chord_m"]
+            z1 = z0 + 0.45
+            # rail body
+            vf = _pipe((x, yl - 0.05, z0), (x, yl - 0.05, z1), 0.05, 6)
+            if vf[0]:
+                chunks.append(vf)
+            # missile body on the rail
+            vf = _taper_pipe((x, yl - 0.05, z0 - 0.05), (x, yl - 0.05, z0 + 0.35),
+                             0.06, 0.03, 8)
+            if vf[0]:
+                chunks.append(vf)
+            # rail fins
+            for fz in (z0, z1 - 0.05):
+                vf = _pipe((x - 0.08, yl - 0.05, fz), (x + 0.08, yl - 0.05, fz), 0.015, 4)
+                if vf[0]:
+                    chunks.append(vf)
+        # -- DEW laser emitter dish on gun housing --
+        dew_col = (180, 60, 60)
+        vf = _taper_pipe((0.12, 0.30, -3.50), (0.12, 0.30, -3.30), 0.08, 0.04, 10)
+        if vf[0]:
+            chunks.append(vf)
+        # lens glow sphere
+        vf = _translate(_sphere(0.05, 10), (0.12, 0.30, -3.52))
+        chunks.append(vf)
+        # -- enhanced gun barrel --
+        gun_col = (110, 90, 80)
+        vf = _pipe((0, 0.30, -3.95), (0, 0.30, -3.20), 0.035, 10)
+        if vf[0]:
+            chunks.append(vf)
+        # muzzle brake
+        vf = _taper_pipe((0, 0.30, -3.20), (0, 0.30, -3.10), 0.045, 0.025, 8)
+        if vf[0]:
+            chunks.append(vf)
+        if chunks:
+            v, f = _combine(chunks)
+            self._weapon_meshes = [Mesh(v, f, (100, 105, 118), "weapons")]
+        else:
+            self._weapon_meshes = []
+        return self._weapon_meshes
 
     def orbit(self, dx, dy):
         self.az += dx * 0.008
@@ -3416,6 +3528,8 @@ class Renderer:
         labels = []
 
         for pi, part in enumerate(self.parts):
+            if self.gear_up and part.group == "gear":
+                continue
             off = part.explode * self.explode_amt * 1.4
             hi = (pi == (self.selected if self.selected is not None else self.hovered))
             dim = part.group in dim_groups
@@ -3479,15 +3593,96 @@ class Renderer:
                     if self.labels:
                         labels.append((cen[2], px, py, part.name))
 
+        # -- faired overlay meshes --
+        if self.faired:
+            for m in self._build_faired_meshes():
+                if not len(m.verts):
+                    continue
+                cam = m.verts @ R.T
+                cam[:, 2] += self.dist
+                z = np.where(cam[:, 2] <= 1e-6, 1e9, cam[:, 2])
+                sx = cx + focal * cam[:, 0] / z
+                sy = cy - focal * cam[:, 1] / z
+                cr, cg, cb = m.color
+                camlist = cam.tolist()
+                for face in m.faces:
+                    if any(camlist[i][2] <= 1e-6 for i in face):
+                        continue
+                    ax, ay, az_ = camlist[face[0]]
+                    bx, by, bz = camlist[face[1]]
+                    ex, ey, ez = camlist[face[2]]
+                    ux, uy, uz = bx - ax, by - ay, bz - az_
+                    wx, wy, wz = ex - ax, ey - ay, ez - az_
+                    nx = uy * wz - uz * wy
+                    ny = uz * wx - ux * wz
+                    nz = ux * wy - uy * wx
+                    ln = (nx * nx + ny * ny + nz * nz) ** 0.5
+                    if ln < 1e-12:
+                        continue
+                    nx /= ln; ny /= ln; nz /= ln
+                    if nz > 0:
+                        nx, ny, nz = -nx, -ny, -nz
+                    dlight = nx * lx + ny * ly + nz * lz
+                    sh = 0.42 + 0.58 * (dlight if dlight > 0 else 0.0)
+                    depth = sum(camlist[i][2] for i in face) / len(face)
+                    polys.append((depth,
+                                  [(sx[i], sy[i]) for i in face],
+                                  (int(cr * sh), int(cg * sh), int(cb * sh)),
+                                  None))
+
+        # -- weapons overlay meshes --
+        if self.weapons_visible:
+            for m in self._build_weapon_meshes():
+                if not len(m.verts):
+                    continue
+                cam = m.verts @ R.T
+                cam[:, 2] += self.dist
+                z = np.where(cam[:, 2] <= 1e-6, 1e9, cam[:, 2])
+                sx = cx + focal * cam[:, 0] / z
+                sy = cy - focal * cam[:, 1] / z
+                cr, cg, cb = m.color
+                camlist = cam.tolist()
+                for face in m.faces:
+                    if any(camlist[i][2] <= 1e-6 for i in face):
+                        continue
+                    ax, ay, az_ = camlist[face[0]]
+                    bx, by, bz = camlist[face[1]]
+                    ex, ey, ez = camlist[face[2]]
+                    ux, uy, uz = bx - ax, by - ay, bz - az_
+                    wx, wy, wz = ex - ax, ey - ay, ez - az_
+                    nx = uy * wz - uz * wy
+                    ny = uz * wx - ux * wz
+                    nz = ux * wy - uy * wx
+                    ln = (nx * nx + ny * ny + nz * nz) ** 0.5
+                    if ln < 1e-12:
+                        continue
+                    nx /= ln; ny /= ln; nz /= ln
+                    if nz > 0:
+                        nx, ny, nz = -nx, -ny, -nz
+                    dlight = nx * lx + ny * ly + nz * lz
+                    sh = 0.42 + 0.58 * (dlight if dlight > 0 else 0.0)
+                    depth = sum(camlist[i][2] for i in face) / len(face)
+                    polys.append((depth,
+                                  [(sx[i], sy[i]) for i in face],
+                                  (int(cr * sh), int(cg * sh), int(cb * sh)),
+                                  None))
+
         polys.sort(key=lambda t: t[0], reverse=True)
         for _, pts, col, outline in polys:
             if len(pts) >= 3:
                 try:
-                    pygame.draw.polygon(surf, col, pts)
-                    if outline:
-                        pygame.draw.polygon(surf, outline, pts, 1)
+                    if self.wireframe:
+                        pygame.draw.polygon(surf, col, pts, 1)
+                    else:
+                        pygame.draw.polygon(surf, col, pts)
+                        if outline:
+                            pygame.draw.polygon(surf, outline, pts, 1)
                 except Exception:
                     pass
+
+        if self.drones_deployed:
+            dpts = self._drone_positions()
+            self.draw_points(surf, rect, dpts, [C_SOLAR] * len(dpts), 3)
 
         if self.labels and font:
             labels.sort(key=lambda t: t[0])
@@ -3583,6 +3778,8 @@ class Renderer:
         lx, ly, lz = self.light
         polys = []
         for part in self.parts:
+            if self.gear_up and part.group == "gear":
+                continue
             for m in part.meshes:
                 if not len(m.verts):
                     continue
@@ -3623,7 +3820,10 @@ class Renderer:
         for _, pts, col in polys:
             if len(pts) >= 3:
                 try:
-                    pygame.draw.polygon(surf, col, pts)
+                    if self.wireframe:
+                        pygame.draw.polygon(surf, col, pts, 1)
+                    else:
+                        pygame.draw.polygon(surf, col, pts)
                 except Exception:
                     pass
         surf.set_clip(clip)
@@ -4789,6 +4989,21 @@ class App:
         if self.air.plasma_on and not self.air.plasma_feasible:
             pl_lines.append(("OVER BUDGET", C_BAD))
         y = _text_block(self.screen, self.font, pl_lines, x, y, lead=2)
+        # visual style indicators
+        styles = []
+        if self.rend.faired: styles.append("FAIRED")
+        if self.rend.wireframe: styles.append("WIRE")
+        if self.rend.gear_up: styles.append("GEAR UP")
+        if self.rend.weapons_visible: styles.append("WEAPONS")
+        if self.rend.drones_deployed: styles.append("DRONES")
+        if self.rend.exploded: styles.append("EXPLODED")
+        if self.rend.section: styles.append("SECTION")
+        if self.rend.labels: styles.append("LABELS")
+        if styles:
+            y += 6
+            y = _text_block(self.screen, self.small, [
+                ("VIEW: " + " ".join(styles), C_ACCENT),
+            ], x, y, lead=1)
         if self.sweep:
             y += 8
             y = _text_block(self.screen, self.font, [
@@ -4909,6 +5124,11 @@ class App:
             ("E ................. exploded view", C_TEXT),
             ("X ................. section cut", C_TEXT),
             ("L ................. part labels", C_TEXT),
+            ("V ................. faired view (streamline fairings)", C_TEXT),
+            ("Z ................. wireframe only", C_TEXT),
+            ("G ................. gear up/down", C_TEXT),
+            ("N ................. weapons overlay (rails, DEW, gun)", C_TEXT),
+            ("O ................. drones deployed", C_TEXT),
             ("SPACE ............. vent burst", C_TEXT),
             ("P ................. toggle plasma stealth", C_TEXT),
             ("B ................. fire 2500 rounds at the frame", C_TEXT),
@@ -5664,6 +5884,21 @@ class App:
                         self.rend.section = not self.rend.section
                     elif ev.key == pygame.K_l:
                         self.rend.labels = not self.rend.labels
+                    elif ev.key == pygame.K_v:
+                        self.rend.faired = not self.rend.faired
+                        self.status = "faired view " + ("ON" if self.rend.faired else "off")
+                    elif ev.key == pygame.K_z:
+                        self.rend.wireframe = not self.rend.wireframe
+                        self.status = "wireframe " + ("ON" if self.rend.wireframe else "off")
+                    elif ev.key == pygame.K_g:
+                        self.rend.gear_up = not self.rend.gear_up
+                        self.status = "gear " + ("UP" if self.rend.gear_up else "DOWN")
+                    elif ev.key == pygame.K_o:
+                        self.rend.drones_deployed = not self.rend.drones_deployed
+                        self.status = "drones " + ("deployed" if self.rend.drones_deployed else "stowed")
+                    elif ev.key == pygame.K_n:
+                        self.rend.weapons_visible = not self.rend.weapons_visible
+                        self.status = "weapons " + ("visible" if self.rend.weapons_visible else "hidden")
                     elif ev.key == pygame.K_h:
                         self.help = not self.help
                     elif ev.key == pygame.K_SPACE:

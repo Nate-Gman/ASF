@@ -1195,6 +1195,11 @@ The viewer uses a pure-Python numpy painter's-algorithm renderer:
 - E — exploded view
 - X — section cut
 - L — part labels
+- V — faired view (streamline fairing pods over tubes)
+- Z — wireframe only (outline rendering)
+- G — gear up/down toggle
+- N — weapons overlay (missile rails, DEW emitter, gun detail)
+- O — drones deployed (25 micro-drones shown around wings)
 - SPACE — vent burst (VBS)
 - P — toggle plasma stealth
 - B — fire 2500 rounds at frame
